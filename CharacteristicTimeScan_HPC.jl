@@ -96,14 +96,14 @@ function efficiency(hole_points, points)
     return β
 end
 
-function calc_score_helper_function(n, p, ϵ, idx, S)
+function calc_score_helper_function(n, p, ϵ, idx, S; MIN_HOLE_POINTS = 8)
     # Extract Starting Position
     points = deepcopy(@view S[idx:n:idx+p,:])
     pc = pointify(points')
 
     # Calculate Homology
-    # PD = ripserer(pc, dim_max = 1, reps = true, cutoff = ϵ)[2]
-    PD = ripserer(pc, dim_max = 1, reps = true)[2]
+    PD = ripserer(pc, dim_max = 1, reps = true, cutoff = ϵ)[2]
+    # PD = ripserer(pc, dim_max = 1, reps = true)[2]
 
     # Temporary output storage
     life_temp_output = 0
@@ -126,32 +126,38 @@ function calc_score_helper_function(n, p, ϵ, idx, S)
         vertex = vertices.(reconstructed_at_birth)
 
         hole_index = zeros(Int,length(reconstructed_at_birth))
-        for k in 1:length(hole_index)
-            # Need to deal with ordering of points in representative cycles
-            if k!= length(hole_index)
-                if vertex[k][1] in vertex[k+1]
-                    hole_index[k] = deepcopy(vertex[k][1])
+
+        if length(hole_index) < MIN_HOLE_POINTS
+            return 0,0,0
+        else
+            for k in 1:length(hole_index)
+                # Need to deal with ordering of points in representative cycles
+                if k!= length(hole_index)
+                    if vertex[k][1] in vertex[k+1]
+                        hole_index[k] = deepcopy(vertex[k][1])
+                    else
+                        hole_index[k] = deepcopy(vertex[k][2])
+                    end
                 else
-                    hole_index[k] = deepcopy(vertex[k][2])
-                end
-            else
-                if vertex[k][1] in vertex[1]
-                    hole_index[k] = deepcopy(vertex[k][1])
-                else
-                    hole_index[k] = deepcopy(vertex[k][2])
+                    if vertex[k][1] in vertex[1]
+                        hole_index[k] = deepcopy(vertex[k][1])
+                    else
+                        hole_index[k] = deepcopy(vertex[k][2])
+                    end
                 end
             end
+            hole_points = deepcopy(@view points[hole_index,:])
+
+            # Calculate Circularity and Eccentricity
+
+            α_temp_output = circularity(hole_points)
+            β_temp_output = efficiency(hole_points, points)
+
+            return life_temp_output, α_temp_output, β_temp_output
         end
-        hole_points = deepcopy(@view points[hole_index,:])
-
-        # Calculate Circularity and Eccentricity
-
-        # if α*β > score_threshold
-        α_temp_output = circularity(hole_points)
-        β_temp_output = efficiency(hole_points, points)
-        # end
+    else
+        return 0,0,0
     end
-    return life_temp_output, α_temp_output, β_temp_output
 end
 
 """
@@ -162,43 +168,56 @@ Outputs results into a jld2 file with name "filename".
 function SToPS(x_input; filename = "output.jld2")
     # %% Hyperparameters
     τ_lags = 1:1:150 # Range of lag values to test
-    window_scales = 4:4 # Size of window to select strand (set at 4τ)
-    SAMPLE_SIZE = 500 # Number of strands to sample
+    # window_scales = 4:4 # Size of window to select strand (set at 4τ)
+    WINDOW_SCALE = 4 #multiplier m for mτ (4 is quarter period)
+    SAMPLE_SIZE = 250 # Number of strands to sample
     MAX_STRAND_LENGTH = 250 # Approximate maximum strand length
+    MAX_ATTEMPT_RATIO = 1#2
 
     # %% Extract and pre-process data
     x = deepcopy(x_input)
     
     # %% Normalise data to unit interval
-    x = (x .-minimum(x))./(maximum(x)-minimum(x))
+    x = (x .-mean(x))./std(x) .+ 0.001.*randn(Float64, size(x))
 
-    # %% Add noise and scaling to fix precision issues
-    x = 5*x .+ 0.015*rand(Float64, size(x))
+    # # %% Add noise and scaling to fix precision issues
+    # x = 5*x .+ 0.015*rand(Float64, size(x))
 
-    pers = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
-    α_val = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
-    β_val = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+    # pers = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+    # α_val = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+    # β_val = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+
+    pers = zeros(length(τ_lags), SAMPLE_SIZE)
+    α_val = zeros(length(τ_lags), SAMPLE_SIZE)
+    β_val = zeros(length(τ_lags), SAMPLE_SIZE)
 
     progress_counter = zeros(length(τ_lags))
 
     for i in 1:length(τ_lags)
 
-        τ = deepcopy(τ_lags[i]) # Chosen lag
-        w = floor(Int,window_scales[end]*τ) # Maximum period being tested
-        S = custom_embed(x, τ, 2)
+        while (length(lifes_nonzero_temp) < SAMPLE_SIZE) && (attempt_counter < round(MAX_ATTEMPT_RATIO*SAMPLE_SIZE/SAMPLE_BATCH_SIZE))
+            print("Lag: $i, Counter: $attempt_counter \n")
+            flush(stdout)
+            
+            # Limit length of data that will be fed in for generating seeds (To speed up performance)
+            FEED_IN_SIZE = min(size(S)[1],10000)
+            feed_idx = rand(1:size(S)[1]-FEED_IN_SIZE+1)
+            S_feed = S[feed_idx:feed_idx+FEED_IN_SIZE-1,:]
+
+            # Use k-means sampling to ensure points are as uniformly sampled as possible
+            # idxs = initseeds(:kmpp,S[1:size(S)[1]-w,:]', SAMPLE_BATCH_SIZE)
+            idxs = initseeds(:kmpp,S_feed[1:size(S_feed)[1]-w,:]', SAMPLE_BATCH_SIZE)
+
+            # Temporary storage for scores
+            ϵs = zeros(length(idxs))
+            lifes = zeros(length(idxs))
+            α_vals = zeros(length(idxs))
+            β_vals = zeros(length(idxs))
 
 
-        idxs = initseeds(:kmpp,S[1:size(S)[1]-w,:]', SAMPLE_SIZE)
-        lifes = zeros(length(idxs), length(window_scales))
-        # p_ents = zeros(length(idxs))
-        α_vals = zeros(length(idxs), length(window_scales))
-        β_vals = zeros(length(idxs), length(window_scales))
-
-
-        for j in 1:length(idxs)
-            for l in 1:length(window_scales)
+            for j in 1:length(idxs)
                 # Construct Point Cloud
-                p = floor(Int,window_scales[l]*τ) # Current period being tested
+                p = WINDOW_SCALE*τ # Length of strand based on quarter period
 
                 if p > MAX_STRAND_LENGTH
                     n = round(Int, p/MAX_STRAND_LENGTH)
@@ -207,26 +226,55 @@ function SToPS(x_input; filename = "output.jld2")
                 end
 
                 # Calculate persistence cutoff for homology
-                ϵ = cutoff_calc(S, n, mode = "mean")
+                ϵ = cutoff_calc(S, n, mode = "quantile")
 
                 # Construct temporary holder variables in memory
-                S_temp = deepcopy(S)
-
+                # S_temp = deepcopy(S)
+                S_temp = deepcopy(S_feed)
                 idx = deepcopy(idxs[j])
 
                 # Calculate component scores and assign to temporary storage
                 life, α, β = calc_score_helper_function(n, p, ϵ, idx, S_temp)
 
-                lifes[j,l] = life
-                α_vals[j,l] = α
-                β_vals[j,l] = β
+                if life > 0 # Hole of sufficient size was found
+                    ϵs[j] = ϵ
+                    lifes[j] = life
+                    α_vals[j] = α
+                    β_vals[j] = β
+
+                    
+                end
             end
+
+            # Calculate significance scores and find all the non-zero values
+            temp_score_vals = α_vals.*β_vals
+            nonzero_idx = findall(!iszero,temp_score_vals)
+            ϵs = ϵs[nonzero_idx]
+            lifes = lifes[nonzero_idx]
+            α_vals = α_vals[nonzero_idx]
+            β_vals = β_vals[nonzero_idx]
+
+            # print("ϵ: $(mean(ϵs)), N: $(length(nonzero_idx)), α: $(mean(α_vals)), β: $(mean(β_vals)), S: $(mean(α_vals.*β_vals)) \n")
+            # flush(stdout)
+            append!(lifes_nonzero_temp, lifes)
+            append!(α_vals_nonzero_temp, α_vals)
+            append!(β_vals_nonzero_temp, β_vals)
+
+            # Update loop counter
+            attempt_counter += 1
         end
 
+        # Extract SAMPLE_SIZE (or less) scores from calculated scores to save
+        FINAL_SAMPLE_SIZE = length(lifes_nonzero_temp)
+        if FINAL_SAMPLE_SIZE>0
+            L = floor(Int, min(FINAL_SAMPLE_SIZE,SAMPLE_SIZE))
+            pers[i,1:L] .= deepcopy(lifes_nonzero_temp[1:L])
+            α_val[i,1:L] .= deepcopy(α_vals_nonzero_temp[1:L])
+            β_val[i,1:L] .= deepcopy(β_vals_nonzero_temp[1:L])
 
-        pers[i,:,:] .= deepcopy(lifes)
-        α_val[i,:,:] .= deepcopy(α_vals)
-        β_val[i,:,:] .= deepcopy(β_vals)
+            print("Lag Summary: N: $L, α: $(mean(α_vals_nonzero_temp[1:L])), β: $(mean(β_vals_nonzero_temp[1:L])), S_mean: $(mean(α_vals_nonzero_temp[1:L].*β_vals_nonzero_temp[1:L])), S_std: $(std(α_vals_nonzero_temp[1:L].*β_vals_nonzero_temp[1:L])) \n")
+            flush(stdout)
+        end
 
         progress_counter[i] = 1
         println("Progress: $(sum(progress_counter))/$(length(τ_lags))")
@@ -258,6 +306,150 @@ function SToPS(x_input; filename = "output.jld2")
     data = Dict("timeseries" => x, "dt" => dt, "lags" => τ_lags, "strand_scale" => window_scales,
                 "persistence" => pers, "circularity" => α_val, "efficiency" => β_val,
                 "pecuzal_embed" => τ_pecuzal, "mdop_embed" => τ_mdop, "MI" => MI_values)
+
+
+    # data = Dict("timeseries" => x, "lags" => τ_lags, "strand_scale" => window_scales,
+    #             "persistence" => pers, "circularity" => α_val, "efficiency" => β_val,
+    #             "pecuzal_embed" => τ_pecuzal, "mdop_embed" => τ_mdop, "MI" => MI_values)
+
+    # %%
+    println("Saving Data...")
+    flush(stdout)
+
+    save(filename, data)
+
+    println("Saved.")
+    flush(stdout)
+end
+
+"""
+Same as the SToPS() function but does not do any computation for PECUZAL and MDOP as comparisons.
+"""
+
+function SToPS_embedding(x_input; filename = "output.jld2")
+    # %% Hyperparameters
+    τ_lags = 1:1:150 # Range of lag values to test
+    # window_scales = 4:4 # Size of window to select strand (set at 4τ)
+    WINDOW_SCALE = 4 #multiplier m for mτ (4 is quarter period)
+    SAMPLE_SIZE = 250 # Number of strands to sample
+    MAX_STRAND_LENGTH = 250 # Approximate maximum strand length
+    MAX_ATTEMPT_RATIO = 1#2
+
+    # %% Extract and pre-process data
+    x = deepcopy(x_input)
+    
+    # %% Normalise data to unit interval
+    x = (x .-mean(x))./std(x) .+ 0.001.*randn(Float64, size(x))
+
+    # # %% Add noise and scaling to fix precision issues
+    # x = 5*x .+ 0.015*rand(Float64, size(x))
+
+    # pers = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+    # α_val = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+    # β_val = zeros(length(τ_lags), SAMPLE_SIZE, length(window_scales))
+
+    pers = zeros(length(τ_lags), SAMPLE_SIZE)
+    α_val = zeros(length(τ_lags), SAMPLE_SIZE)
+    β_val = zeros(length(τ_lags), SAMPLE_SIZE)
+
+    progress_counter = zeros(length(τ_lags))
+
+    for i in 1:length(τ_lags)
+
+        while (length(lifes_nonzero_temp) < SAMPLE_SIZE) && (attempt_counter < round(MAX_ATTEMPT_RATIO*SAMPLE_SIZE/SAMPLE_BATCH_SIZE))
+            print("Lag: $i, Counter: $attempt_counter \n")
+            flush(stdout)
+            
+            # Limit length of data that will be fed in for generating seeds (To speed up performance)
+            FEED_IN_SIZE = min(size(S)[1],10000)
+            feed_idx = rand(1:size(S)[1]-FEED_IN_SIZE+1)
+            S_feed = S[feed_idx:feed_idx+FEED_IN_SIZE-1,:]
+
+            # Use k-means sampling to ensure points are as uniformly sampled as possible
+            # idxs = initseeds(:kmpp,S[1:size(S)[1]-w,:]', SAMPLE_BATCH_SIZE)
+            idxs = initseeds(:kmpp,S_feed[1:size(S_feed)[1]-w,:]', SAMPLE_BATCH_SIZE)
+
+            # Temporary storage for scores
+            ϵs = zeros(length(idxs))
+            lifes = zeros(length(idxs))
+            α_vals = zeros(length(idxs))
+            β_vals = zeros(length(idxs))
+
+
+            for j in 1:length(idxs)
+                # Construct Point Cloud
+                p = WINDOW_SCALE*τ # Length of strand based on quarter period
+
+                if p > MAX_STRAND_LENGTH
+                    n = round(Int, p/MAX_STRAND_LENGTH)
+                else
+                    n = 1
+                end
+
+                # Calculate persistence cutoff for homology
+                ϵ = cutoff_calc(S, n, mode = "quantile")
+
+                # Construct temporary holder variables in memory
+                # S_temp = deepcopy(S)
+                S_temp = deepcopy(S_feed)
+                idx = deepcopy(idxs[j])
+
+                # Calculate component scores and assign to temporary storage
+                life, α, β = calc_score_helper_function(n, p, ϵ, idx, S_temp)
+
+                if life > 0 # Hole of sufficient size was found
+                    ϵs[j] = ϵ
+                    lifes[j] = life
+                    α_vals[j] = α
+                    β_vals[j] = β
+
+                    
+                end
+            end
+
+            # Calculate significance scores and find all the non-zero values
+            temp_score_vals = α_vals.*β_vals
+            nonzero_idx = findall(!iszero,temp_score_vals)
+            ϵs = ϵs[nonzero_idx]
+            lifes = lifes[nonzero_idx]
+            α_vals = α_vals[nonzero_idx]
+            β_vals = β_vals[nonzero_idx]
+
+            # print("ϵ: $(mean(ϵs)), N: $(length(nonzero_idx)), α: $(mean(α_vals)), β: $(mean(β_vals)), S: $(mean(α_vals.*β_vals)) \n")
+            # flush(stdout)
+            append!(lifes_nonzero_temp, lifes)
+            append!(α_vals_nonzero_temp, α_vals)
+            append!(β_vals_nonzero_temp, β_vals)
+
+            # Update loop counter
+            attempt_counter += 1
+        end
+
+        # Extract SAMPLE_SIZE (or less) scores from calculated scores to save
+        FINAL_SAMPLE_SIZE = length(lifes_nonzero_temp)
+        if FINAL_SAMPLE_SIZE>0
+            L = floor(Int, min(FINAL_SAMPLE_SIZE,SAMPLE_SIZE))
+            pers[i,1:L] .= deepcopy(lifes_nonzero_temp[1:L])
+            α_val[i,1:L] .= deepcopy(α_vals_nonzero_temp[1:L])
+            β_val[i,1:L] .= deepcopy(β_vals_nonzero_temp[1:L])
+
+            print("Lag Summary: N: $L, α: $(mean(α_vals_nonzero_temp[1:L])), β: $(mean(β_vals_nonzero_temp[1:L])), S_mean: $(mean(α_vals_nonzero_temp[1:L].*β_vals_nonzero_temp[1:L])), S_std: $(std(α_vals_nonzero_temp[1:L].*β_vals_nonzero_temp[1:L])) \n")
+            flush(stdout)
+        end
+
+        progress_counter[i] = 1
+        println("Progress: $(sum(progress_counter))/$(length(τ_lags))")
+        flush(stdout)
+    end
+
+    # %% Save data
+    data = Dict("timeseries" => x, "dt" => dt, "lags" => τ_lags, "strand_scale" => window_scales,
+                "persistence" => pers, "circularity" => α_val, "efficiency" => β_val)
+
+
+    # data = Dict("timeseries" => x, "lags" => τ_lags, "strand_scale" => window_scales,
+    #             "persistence" => pers, "circularity" => α_val, "efficiency" => β_val,
+    #             "pecuzal_embed" => τ_pecuzal, "mdop_embed" => τ_mdop, "MI" => MI_values)
 
     # %%
     println("Saving Data...")
