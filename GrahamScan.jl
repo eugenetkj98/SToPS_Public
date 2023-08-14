@@ -9,7 +9,7 @@ largest bounding convex polygon from a collection of points.
 function graham(pointcollection)
     # Find Lowest point for boundary
     N = size(pointcollection)[1]
-    points = DataFrame(pointcollection)
+    points = DataFrame(pointcollection, :auto)
     hull = []
     interior = []
     minindex = findmin(points[:,2])[2]

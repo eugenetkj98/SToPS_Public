@@ -12,8 +12,8 @@ Several hyperparameters are also given to be tweaked.
 SToPS() is the function to run the analyses.
 """
 
-using FileIO
-using JLD2
+# using FileIO
+# using JLD2
 using DataFrames
 using CSV
 using Clustering
@@ -79,7 +79,7 @@ function efficiency(hole_points, points)
     P = M.proj # Projection Matrix
     μ = M.mean # Mean values
     y_homology = transpose(P' *(Matrix(hole_points').-μ)) # Homology polygon in transformed space
-    y_pc = transpose(P' *(Matrix(points').-μ)) # Point cloud in transformed space
+    y_pc = Array(transpose(P' *(Matrix(points').-μ))) # Point cloud in transformed space
 
 
     # Calculate area of homology generator polygon
@@ -165,14 +165,15 @@ Calculate SToPS Characteristic times from an input univariate time series x.
 Also calculates some non-uniform delay lags from automated embedding methods PECUZAL, MDOP.
 Outputs results into a jld2 file with name "filename".
 """
-function SToPS(x_input; filename = "output.jld2")
+function SToPS(x_input; τ_lags = 1:1:100,  filename = nothing)
     # %% Hyperparameters
-    τ_lags = 1:1:150 # Range of lag values to test
+    # τ_lags = 1:1:100 # Range of lag values to test
     # window_scales = 4:4 # Size of window to select strand (set at 4τ)
     WINDOW_SCALE = 4 #multiplier m for mτ (4 is quarter period)
     SAMPLE_SIZE = 250 # Number of strands to sample
+    SAMPLE_BATCH_SIZE = 250 # Number of strands per batch?
     MAX_STRAND_LENGTH = 250 # Approximate maximum strand length
-    MAX_ATTEMPT_RATIO = 1#2
+    MAX_ATTEMPT_RATIO = 5
 
     # %% Extract and pre-process data
     x = deepcopy(x_input)
@@ -194,6 +195,14 @@ function SToPS(x_input; filename = "output.jld2")
     progress_counter = zeros(length(τ_lags))
 
     for i in 1:length(τ_lags)
+        τ = deepcopy(τ_lags[i])
+        w = WINDOW_SCALE*τ
+        S = custom_embed(deepcopy(x), τ, 2)
+
+        lifes_nonzero_temp = []
+        α_vals_nonzero_temp = []
+        β_vals_nonzero_temp = []
+        attempt_counter = 0
 
         while (length(lifes_nonzero_temp) < SAMPLE_SIZE) && (attempt_counter < round(MAX_ATTEMPT_RATIO*SAMPLE_SIZE/SAMPLE_BATCH_SIZE))
             print("Lag: $i, Counter: $attempt_counter \n")
@@ -303,43 +312,42 @@ function SToPS(x_input; filename = "output.jld2")
     τ_mdop =  mdop_embedding(x, τs = τ_lags, w = theiler, max_num_of_cycles = 5)[2]
 
     # %% Save data
-    data = Dict("timeseries" => x, "dt" => dt, "lags" => τ_lags, "strand_scale" => window_scales,
+    data = Dict("timeseries" => x, "lags" => τ_lags,# "strand_scale" => window_scales,
                 "persistence" => pers, "circularity" => α_val, "efficiency" => β_val,
                 "pecuzal_embed" => τ_pecuzal, "mdop_embed" => τ_mdop, "MI" => MI_values)
 
+    if isnothing(filename)
+        return data
+    else
+        println("Saving Data...")
+        flush(stdout)
 
-    # data = Dict("timeseries" => x, "lags" => τ_lags, "strand_scale" => window_scales,
-    #             "persistence" => pers, "circularity" => α_val, "efficiency" => β_val,
-    #             "pecuzal_embed" => τ_pecuzal, "mdop_embed" => τ_mdop, "MI" => MI_values)
+        save(filename, data)
 
-    # %%
-    println("Saving Data...")
-    flush(stdout)
-
-    save(filename, data)
-
-    println("Saved.")
-    flush(stdout)
+        println("Saved.")
+        flush(stdout)
+    end
 end
 
 """
 Same as the SToPS() function but does not do any computation for PECUZAL and MDOP as comparisons.
 """
 
-function SToPS_embedding(x_input; filename = "output.jld2")
+function SToPS_embedding(x_input; τ_lags = 1:1:100,  filename = nothing)
     # %% Hyperparameters
-    τ_lags = 1:1:150 # Range of lag values to test
+    # τ_lags = 1:1:100 # Range of lag values to test
     # window_scales = 4:4 # Size of window to select strand (set at 4τ)
     WINDOW_SCALE = 4 #multiplier m for mτ (4 is quarter period)
     SAMPLE_SIZE = 250 # Number of strands to sample
+    SAMPLE_BATCH_SIZE = 250 # Number of strands per batch?
     MAX_STRAND_LENGTH = 250 # Approximate maximum strand length
-    MAX_ATTEMPT_RATIO = 1#2
+    MAX_ATTEMPT_RATIO = 5
 
     # %% Extract and pre-process data
     x = deepcopy(x_input)
     
     # %% Normalise data to unit interval
-    x = (x .-mean(x))./std(x) .+ 0.001.*randn(Float64, size(x))
+    x = (x .-mean(x))./std(x)# .+ 0.001.*randn(Float64, size(x))
 
     # # %% Add noise and scaling to fix precision issues
     # x = 5*x .+ 0.015*rand(Float64, size(x))
@@ -354,7 +362,18 @@ function SToPS_embedding(x_input; filename = "output.jld2")
 
     progress_counter = zeros(length(τ_lags))
 
+
+
     for i in 1:length(τ_lags)
+        τ = deepcopy(τ_lags[i])
+        w = WINDOW_SCALE*τ
+        S = custom_embed(deepcopy(x), τ, 2)
+
+        lifes_nonzero_temp = []
+        α_vals_nonzero_temp = []
+        β_vals_nonzero_temp = []
+        attempt_counter = 0
+
 
         while (length(lifes_nonzero_temp) < SAMPLE_SIZE) && (attempt_counter < round(MAX_ATTEMPT_RATIO*SAMPLE_SIZE/SAMPLE_BATCH_SIZE))
             print("Lag: $i, Counter: $attempt_counter \n")
@@ -443,20 +462,44 @@ function SToPS_embedding(x_input; filename = "output.jld2")
     end
 
     # %% Save data
-    data = Dict("timeseries" => x, "dt" => dt, "lags" => τ_lags, "strand_scale" => window_scales,
-                "persistence" => pers, "circularity" => α_val, "efficiency" => β_val)
+    data = Dict("timeseries" => x, "lags" => τ_lags,# "strand_scale" => window_scales,
+    "persistence" => pers, "circularity" => α_val, "efficiency" => β_val)
 
-
-    # data = Dict("timeseries" => x, "lags" => τ_lags, "strand_scale" => window_scales,
-    #             "persistence" => pers, "circularity" => α_val, "efficiency" => β_val,
-    #             "pecuzal_embed" => τ_pecuzal, "mdop_embed" => τ_mdop, "MI" => MI_values)
-
-    # %%
-    println("Saving Data...")
-    flush(stdout)
-
-    save(filename, data)
-
-    println("Saved.")
-    flush(stdout)
+    if isnothing(filename)
+        return data
+    else 
+        println("Saving Data...")
+        flush(stdout)
+        
+        save(filename, data)
+        
+        println("Saved.")
+        flush(stdout)
+    end
 end
+
+
+# %%
+
+# %% Time Series Generation Settings
+T = 25000
+wash = 20000
+dt = 0.001#0.002#10/5000
+
+ω = 2*pi.*[1,5, 30]
+ϕ = (pi)*[0,0.25,0.75]
+r = [1,0.5, 0.2]
+t = 0:dt:dt*T
+θ = repeat(t, 1,3).*repeat(ω, 1,length(t))'.+repeat(ϕ, 1,length(t))'
+ts = (sin.(θ))*r
+# x = integrate(lorenz!, T = T+wash,dt = dt, RK = true, supersample = 10)[wash+1:end,1]
+# ts = integrate(rossler_PC!, T = T+wash,dt = dt, RK = true, supersample = 10)[wash+1:end,1]
+
+
+# ts = sin.(0:(0.5*2π/64):8*(2π)).+0.5.*sin.((0:(0.5*2π/64):8*(2π)).*8)
+using Plots
+plot(ts)
+
+output = SToPS_embedding(ts, τ_lags = 1:1:300)
+stops_out = std(output["circularity"].*output["efficiency"], dims = 2)[:]
+plot(stops_out)
